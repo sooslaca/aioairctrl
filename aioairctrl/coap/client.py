@@ -1,5 +1,6 @@
 """CoAP client for Philips air purifiers."""
 
+import asyncio
 import json
 import logging
 import os
@@ -107,7 +108,7 @@ class Client:
             logger.debug("max age = %s", max_age)
         return state_reported["state"]["reported"], max_age
 
-    async def observe_status(self):
+    async def observe_status(self, inital_timeout=180):
         """Async generator that yields state_reported dicts as the device pushes updates."""
 
         def decrypt_status(response):
@@ -127,11 +128,19 @@ class Client:
         requester = self._ctx.request(request)
         observation = requester.observation
         try:
-            response = await requester.response
+            response = await asyncio.wait_for(requester.response, timeout=inital_timeout)
             yield decrypt_status(response)
             if observation is not None:
-                async for response in observation:
-                    yield decrypt_status(response)
+                timeout = response.opt.max_age + 30
+                iterator = observation.__aiter__()
+                while True:
+                    try:
+                        response = await asyncio.wait_for(iterator.__anext__(), timeout=timeout)
+                        yield decrypt_status(response)
+                    except StopAsyncIteration:
+                        break
+        except asyncio.TimeoutError:
+          logger.warning("observing timeout!")
         finally:
             # Cancel the observation when the caller stops iterating, so the
             # device stops sending notifications and aiocoap frees its resources.
